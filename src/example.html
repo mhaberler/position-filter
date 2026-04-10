@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RobustAdaptiveEKF — watchPosition demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; padding: 1.25rem;
+         background: #0f172a; color: #e2e8f0; }
+
+  h1   { font-size: 1.1rem; margin-bottom: 0.75rem; color: #93c5fd; }
+
+  #status {
+    margin-bottom: 0.75rem; padding: 0.45rem 0.75rem;
+    border-radius: 6px; background: #1e293b;
+    font-size: 0.82rem; color: #94a3b8;
+  }
+  #status.ok   { color: #4ade80; }
+  #status.warn { color: #facc15; }
+  #status.err  { color: #f87171; }
+
+  .table-wrap { overflow-x: auto; }
+
+  table {
+    border-collapse: collapse; width: 100%;
+    font-size: 0.78rem; white-space: nowrap;
+  }
+  th {
+    background: #1e3a5f; color: #93c5fd;
+    padding: 6px 10px; text-align: right;
+  }
+  th:first-child { text-align: left; }
+  td {
+    padding: 5px 10px; text-align: right;
+    border-bottom: 1px solid #1e293b;
+  }
+  td:first-child { text-align: left; font-variant-numeric: tabular-nums; color: #64748b; }
+  tr:hover td { background: #1e293b; }
+
+  .gps  { color: #7dd3fc; }
+  .ekf  { color: #86efac; }
+  .null { color: #475569; font-style: italic; }
+  .dlt  { color: #fcd34d; }
+
+  tfoot td {
+    padding-top: 0.6rem; font-size: 0.72rem;
+    color: #475569; text-align: left;
+    white-space: normal; border: none;
+  }
+
+  #btn-clear {
+    margin-top: 0.9rem; padding: 0.35rem 1rem;
+    background: #374151; border: none; border-radius: 5px;
+    color: #e2e8f0; cursor: pointer; font-size: 0.82rem;
+  }
+  #btn-clear:hover { background: #4b5563; }
+</style>
+</head>
+<body>
+<h1>RobustAdaptiveEKF — watchPosition demo</h1>
+<div id="status">Waiting for geolocation permission…</div>
+
+<div class="table-wrap">
+  <table id="log">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th class="gps">GPS spd<br>(km/h)</th>
+        <th class="gps">GPS hdg<br>(°)</th>
+        <th class="gps">GPS acc<br>(m)</th>
+        <th class="ekf">EKF spd<br>(km/h)</th>
+        <th class="ekf">EKF hdg<br>(°)</th>
+        <th class="dlt">Δ spd<br>(km/h)</th>
+        <th class="dlt">Δ hdg<br>(°)</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+    <tfoot>
+      <tr>
+        <td colspan="8">
+          <span class="gps">GPS</span> = raw GeolocationCoordinates &nbsp;·&nbsp;
+          <span class="ekf">EKF</span> = filtered estimate &nbsp;·&nbsp;
+          <span class="dlt">Δ</span> = |GPS − EKF| &nbsp;·&nbsp;
+          — = field not provided by browser/device
+        </td>
+      </tr>
+    </tfoot>
+  </table>
+</div>
+
+<button id="btn-clear">Clear table</button>
+
+<script type="module">
+// ─── math.js from CDN (ESM bundle) ─────────────────────────────────────────
+import * as math from 'https://esm.sh/mathjs@13?bundle';
+
+// ─── RobustAdaptiveEKF ─────────────────────────────────────────────────────
+// Direct port of ekf-module/robustEKF.ts; matrix ops via math.js.
+//
+// State: [lat°, lon°, heading_rad, speed_mps]
+// Heading: clockwise from north — consistent with atan2(east, north).
+
+const R_EARTH = 111_111;                    // metres per degree latitude (approx)
+const HUBER_K = 1.345 * Math.sqrt(2);      // 2-DoF Huber threshold
+
+class RobustAdaptiveEKF {
+  /**
+   * @param {number} lat        Initial latitude  (degrees)
+   * @param {number} lon        Initial longitude (degrees)
+   * @param {number} headingRad Initial heading, radians CW from north (default 0)
+   * @param {number} speedMps   Initial speed m/s (default 0)
+   */
+  constructor(lat, lon, headingRad = 0, speedMps = 0) {
+    this.x = [lat, lon, headingRad, speedMps];
+
+    // Initial covariance — tight on position, diffuse on heading/speed
+    this.P = math.matrix([
+      [1e-8, 0,    0,            0 ],
+      [0,    1e-8, 0,            0 ],
+      [0,    0,    Math.PI ** 2, 0 ],
+      [0,    0,    0,           25 ],
+    ]);
+
+    // Process noise — position driven by model; heading/speed free to evolve
+    this.Q = math.matrix([
+      [1e-13, 0,     0,     0    ],
+      [0,     1e-13, 0,     0    ],
+      [0,     0,     1e-4,  0    ],
+      [0,     0,     0,     0.25 ],
+    ]);
+  }
+
+  /** Time-update: propagate state by dtSeconds. */
+  predict(dtSeconds) {
+    const [lat, lon, h, v] = this.x;
+    const c = Math.cos(lat * Math.PI / 180);
+    const dt = dtSeconds;
+
+    this.x = [
+      lat + v * Math.cos(h) * dt / R_EARTH,
+      lon + v * Math.sin(h) * dt / (R_EARTH * c),
+      h,
+      v,
+    ];
+
+    const F = math.matrix([
+      [1, 0, -v * Math.sin(h) * dt / R_EARTH,            Math.cos(h) * dt / R_EARTH            ],
+      [0, 1,  v * Math.cos(h) * dt / (R_EARTH * c),      Math.sin(h) * dt / (R_EARTH * c)      ],
+      [0, 0,  1,                                          0                                      ],
+      [0, 0,  0,                                          1                                      ],
+    ]);
+
+    // P ← F P Fᵀ + Q
+    this.P = math.add(
+      math.multiply(math.multiply(F, this.P), math.transpose(F)),
+      this.Q,
+    );
+  }
+
+  /** Measurement-update: fuse one GPS lat/lon fix. */
+  update(measLat, measLon) {
+    const c = Math.cos(this.x[0] * Math.PI / 180);
+    const innov = [measLat - this.x[0], measLon - this.x[1]];
+
+    // GPS noise ≈ 3 m → degrees²
+    const rLat = (3 / R_EARTH) ** 2;
+    const rLon = (3 / (R_EARTH * c)) ** 2;
+
+    // Innovation covariance  S = H P Hᵀ + R  (H = first 2 rows of I₄)
+    const P = this.P.toArray();
+    const S = [
+      [P[0][0] + rLat, P[0][1]        ],
+      [P[1][0],        P[1][1] + rLon ],
+    ];
+
+    // Mahalanobis distance²
+    const Si = math.inv(math.matrix(S)).toArray();
+    const norm2 =
+      innov[0] * (Si[0][0] * innov[0] + Si[0][1] * innov[1]) +
+      innov[1] * (Si[1][0] * innov[0] + Si[1][1] * innov[1]);
+
+    // Adaptive R: inflate when residual is large
+    const adaptF = Math.max(1, norm2 / 2);
+    const Sa = math.matrix([
+      [S[0][0] * adaptF, S[0][1]          ],
+      [S[1][0],          S[1][1] * adaptF ],
+    ]);
+
+    // Huber robustness weight
+    const wt = norm2 < HUBER_K ** 2 ? 1 : HUBER_K / Math.sqrt(norm2);
+
+    // K = P Hᵀ Sₐ⁻¹  (4×2)
+    const Sai = math.inv(Sa).toArray();
+    const K = P.map(row => [
+      row[0] * Sai[0][0] + row[1] * Sai[1][0],
+      row[0] * Sai[0][1] + row[1] * Sai[1][1],
+    ]);
+
+    for (let i = 0; i < 4; i++)
+      this.x[i] += wt * (K[i][0] * innov[0] + K[i][1] * innov[1]);
+
+    // Wrap heading to (−π, π]
+    this.x[2] = ((this.x[2] % (2 * Math.PI)) + 3 * Math.PI) % (2 * Math.PI) - Math.PI;
+
+    // P ← (I − KH) P
+    const KH = math.matrix(K.map(row => [row[0], row[1], 0, 0]));
+    this.P = math.multiply(
+      math.subtract(math.identity(4), KH),
+      this.P,
+    );
+  }
+
+  /** Heading in degrees [0°, 360°), clockwise from north */
+  getHeadingDeg() {
+    return ((this.x[2] * 180 / Math.PI) % 360 + 360) % 360;
+  }
+
+  /** Speed in km/h */
+  getSpeedKmh() { return this.x[3] * 3.6; }
+
+  /** Speed in m/s */
+  getSpeed()    { return this.x[3]; }
+
+  /** Heading in radians (−π, π] */
+  getHeading()  { return this.x[2]; }
+
+  /** Full state snapshot */
+  getState() {
+    const [lat, lon, headingRad, speedMps] = this.x;
+    return { lat, lon, headingRad, speedMps };
+  }
+}
+
+// ─── Demo wiring ────────────────────────────────────────────────────────────
+
+const tbody    = document.getElementById('tbody');
+const statusEl = document.getElementById('status');
+const MAX_ROWS = 200;
+
+let ekf      = null;
+let lastTime = null;
+let rowCount = 0;
+
+function fmt1(v) { return v == null ? null : v.toFixed(1); }
+
+function cell(value, cls) {
+  if (value == null) return `<td class="null">—</td>`;
+  return `<td class="${cls}">${value}</td>`;
+}
+
+function onPosition(pos) {
+  const { latitude: lat, longitude: lon,
+          speed, heading, accuracy } = pos.coords;
+  const now = pos.timestamp;   // ms
+
+  if (!ekf) {
+    const h0 = heading != null ? heading * Math.PI / 180 : 0;
+    const v0 = speed  != null ? speed : 0;
+    ekf = new RobustAdaptiveEKF(lat, lon, h0, v0);
+    lastTime = now;
+    statusEl.textContent =
+      `EKF initialised at ${lat.toFixed(5)}, ${lon.toFixed(5)} — waiting for next fix…`;
+    statusEl.className = 'ok';
+    return;
+  }
+
+  const dtSec = (now - lastTime) / 1000;
+  lastTime = now;
+
+  ekf.predict(dtSec);
+  ekf.update(lat, lon);
+
+  const ekfSpd = ekf.getSpeedKmh();
+  const ekfHdg = ekf.getHeadingDeg();
+
+  // GPS values (may be null on some platforms)
+  const gpsSpd = speed   != null ? speed * 3.6 : null;
+  const gpsHdg = heading != null ? heading      : null;
+
+  // Deltas (only when GPS field available)
+  const dSpd = gpsSpd != null ? Math.abs(gpsSpd - ekfSpd) : null;
+  const dHdg = gpsHdg != null ? (() => {
+    const d = Math.abs(gpsHdg - ekfHdg) % 360;
+    return d > 180 ? 360 - d : d;
+  })() : null;
+
+  const timeStr = new Date(now).toLocaleTimeString();
+
+  const row = document.createElement('tr');
+  row.innerHTML =
+    `<td>${timeStr}</td>` +
+    cell(fmt1(gpsSpd), 'gps') +
+    cell(fmt1(gpsHdg), 'gps') +
+    cell(fmt1(accuracy), 'gps') +
+    `<td class="ekf">${ekfSpd.toFixed(1)}</td>` +
+    `<td class="ekf">${ekfHdg.toFixed(1)}</td>` +
+    cell(fmt1(dSpd), 'dlt') +
+    cell(fmt1(dHdg), 'dlt');
+
+  tbody.prepend(row);
+
+  if (++rowCount > MAX_ROWS) tbody.lastElementChild?.remove();
+
+  const accClass = accuracy < 20 ? 'ok' : 'warn';
+  statusEl.textContent =
+    `Fix #${rowCount} · acc ${accuracy.toFixed(0)} m · dt ${dtSec.toFixed(1)} s` +
+    ` · EKF ${ekfSpd.toFixed(1)} km/h @ ${ekfHdg.toFixed(0)}°`;
+  statusEl.className = accClass;
+}
+
+function onError(err) {
+  statusEl.textContent = `Geolocation error ${err.code}: ${err.message}`;
+  statusEl.className = 'err';
+}
+
+if (!navigator.geolocation) {
+  statusEl.textContent = 'Geolocation not supported by this browser.';
+  statusEl.className = 'err';
+} else {
+  navigator.geolocation.watchPosition(onPosition, onError, {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 30_000,
+  });
+}
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  tbody.innerHTML = '';
+  rowCount = 0;
+});
+</script>
+</body>
+</html>
