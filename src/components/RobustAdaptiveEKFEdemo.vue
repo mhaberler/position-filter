@@ -88,16 +88,6 @@ function onError() {
   statusClass.value = 'err'
 }
 
-function clearTable() {
-  gpsSpd.value = null
-  gpsHdg.value = null
-  gpsAcc.value = null
-  ekfSpd.value = 0
-  ekfHdg.value = 0
-  dSpd.value = null
-  dHdg.value = null
-}
-
 function toggleGraphs() {
   if (isRunning.value) {
     speedChart.stop()
@@ -200,7 +190,6 @@ onMounted(() => {
       </table>
     </div>
 
-    <button id="btn-clear" @click="clearTable">Clear table</button>
     <button id="btn-toggle" @click="toggleGraphs">{{ isRunning ? 'Stop' : 'Start' }} graphs</button>
   </div>
 </template>
