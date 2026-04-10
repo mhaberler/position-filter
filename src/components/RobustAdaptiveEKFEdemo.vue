@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { RobustAdaptiveEKF } from '../util/robustEKF'
-import { TimeSeries, SmoothieChart } from 'smoothie'
+import uPlot from 'uplot'
 
 const status = ref('Waiting for geolocation permission…')
 const statusClass = ref('')
@@ -20,12 +20,11 @@ let ekf: RobustAdaptiveEKF | null = null
 let lastTime: number | null = null
 
 // Graphs
-let speedChart: SmoothieChart
-let headingChart: SmoothieChart
-let gpsSpeedSeries: TimeSeries
-let ekfSpeedSeries: TimeSeries
-let gpsHeadingSeries: TimeSeries
-let ekfHeadingSeries: TimeSeries
+let speedPlot: uPlot
+let headingPlot: uPlot
+let speedData: [number[], number[], number[]]
+let headingData: [number[], number[], number[]]
+const MAX_POINTS = 100
 
 function fmt1(v: number | null): string | null {
   return v == null ? null : v.toFixed(1)
@@ -73,10 +72,27 @@ function onPosition(pos: GeolocationPosition) {
   dHdg.value = currentDHdg
 
   // Update graphs
-  if (gpsSpd.value != null) gpsSpeedSeries.append(now, gpsSpd.value)
-  ekfSpeedSeries.append(now, ekfSpd.value)
-  if (gpsHdg.value != null) gpsHeadingSeries.append(now, gpsHdg.value)
-  ekfHeadingSeries.append(now, ekfHdg.value)
+  if (isRunning.value) {
+    speedData[0].push(now / 1000) // time in seconds
+    speedData[1].push(gpsSpd.value ?? NaN)
+    speedData[2].push(ekfSpd.value)
+    if (speedData[0].length > MAX_POINTS) {
+      speedData[0].shift()
+      speedData[1].shift()
+      speedData[2].shift()
+    }
+    speedPlot.setData(speedData)
+
+    headingData[0].push(now / 1000)
+    headingData[1].push(gpsHdg.value ?? NaN)
+    headingData[2].push(ekfHdg.value)
+    if (headingData[0].length > MAX_POINTS) {
+      headingData[0].shift()
+      headingData[1].shift()
+      headingData[2].shift()
+    }
+    headingPlot.setData(headingData)
+  }
 
   const accClass = accuracy < 20 ? 'ok' : 'warn'
   status.value = `acc ${accuracy.toFixed(0)} m · dt ${dtSec.toFixed(1)} s · EKF ${ekfSpd.value.toFixed(1)} km/h @ ${ekfHdg.value.toFixed(0)}°`
@@ -89,40 +105,45 @@ function onError() {
 }
 
 function toggleGraphs() {
-  if (isRunning.value) {
-    speedChart.stop()
-    headingChart.stop()
-  } else {
-    speedChart.start()
-    headingChart.start()
-  }
   isRunning.value = !isRunning.value
 }
 
 onMounted(() => {
   // Initialize graphs
-  gpsSpeedSeries = new TimeSeries()
-  ekfSpeedSeries = new TimeSeries()
-  gpsHeadingSeries = new TimeSeries()
-  ekfHeadingSeries = new TimeSeries()
+  speedData = [[], [], []]
+  headingData = [[], [], []]
 
-  speedChart = new SmoothieChart({
-    millisPerPixel: 100,
-    grid: { fillStyle: '#0f172a', strokeStyle: '#1e293b' },
-    labels: { fillStyle: '#e2e8f0' }
-  })
-  speedChart.addTimeSeries(gpsSpeedSeries, { strokeStyle: '#7dd3fc', lineWidth: 2 })
-  speedChart.addTimeSeries(ekfSpeedSeries, { strokeStyle: '#86efac', lineWidth: 2 })
-  speedChart.streamTo(document.getElementById('speed-canvas') as HTMLCanvasElement, 1000)
+  const opts: uPlot.Options = {
+    width: 400,
+    height: 150,
+    scales: {
+      x: { time: true },
+    },
+    axes: [
+      {
+        stroke: '#e2e8f0',
+        grid: { stroke: '#1e293b' },
+      },
+      {
+        stroke: '#e2e8f0',
+        grid: { stroke: '#1e293b' },
+      },
+    ],
+    series: [
+      {},
+      {
+        stroke: '#7dd3fc',
+        width: 2,
+      },
+      {
+        stroke: '#86efac',
+        width: 2,
+      },
+    ],
+  }
 
-  headingChart = new SmoothieChart({
-    millisPerPixel: 100,
-    grid: { fillStyle: '#0f172a', strokeStyle: '#1e293b' },
-    labels: { fillStyle: '#e2e8f0' }
-  })
-  headingChart.addTimeSeries(gpsHeadingSeries, { strokeStyle: '#7dd3fc', lineWidth: 2 })
-  headingChart.addTimeSeries(ekfHeadingSeries, { strokeStyle: '#86efac', lineWidth: 2 })
-  headingChart.streamTo(document.getElementById('heading-canvas') as HTMLCanvasElement, 1000)
+  speedPlot = new uPlot(opts, speedData, document.getElementById('speed-canvas') as HTMLDivElement)
+  headingPlot = new uPlot(opts, headingData, document.getElementById('heading-canvas') as HTMLDivElement)
 
   if (!navigator.geolocation) {
     status.value = 'Location is unavailable'
@@ -145,11 +166,11 @@ onMounted(() => {
     <div class="graphs">
       <div>
         <h2>Speed (km/h)</h2>
-        <canvas id="speed-canvas" style="width: 100%; height: 150px;"></canvas>
+        <div id="speed-canvas" style="width: 100%; height: 150px;"></div>
       </div>
       <div>
         <h2>Heading (°)</h2>
-        <canvas id="heading-canvas" style="width: 100%; height: 150px;"></canvas>
+        <div id="heading-canvas" style="width: 100%; height: 150px;"></div>
       </div>
     </div>
 
