@@ -3,25 +3,21 @@ import { ref, onMounted } from 'vue'
 import { RobustAdaptiveEKF } from '../util/robustEKF'
 import { TimeSeries, SmoothieChart } from 'smoothie'
 
-interface Row {
-  time: string
-  gpsSpd: number | null
-  gpsHdg: number | null
-  gpsAcc: number | null
-  ekfSpd: number
-  ekfHdg: number
-  dSpd: number | null
-  dHdg: number | null
-}
-
-const rows = ref<Row[]>([])
 const status = ref('Waiting for geolocation permission…')
 const statusClass = ref('')
-const MAX_ROWS = 200
+const isRunning = ref(true)
+
+// Current values
+const gpsSpd = ref<number | null>(null)
+const gpsHdg = ref<number | null>(null)
+const gpsAcc = ref<number | null>(null)
+const ekfSpd = ref(0)
+const ekfHdg = ref(0)
+const dSpd = ref<number | null>(null)
+const dHdg = ref<number | null>(null)
 
 let ekf: RobustAdaptiveEKF | null = null
 let lastTime: number | null = null
-let rowCount = 0
 
 // Graphs
 let speedChart: SmoothieChart
@@ -55,43 +51,35 @@ function onPosition(pos: GeolocationPosition) {
   ekf.predict(dtSec)
   ekf.update(lat, lon)
 
-  const ekfSpd = ekf.getSpeedKmh()
-  const ekfHdg = ekf.getHeadingDeg()
+  const currentEkfSpd = ekf.getSpeedKmh()
+  const currentEkfHdg = ekf.getHeadingDeg()
 
-  const gpsSpd = speed != null ? speed * 3.6 : null
-  const gpsHdg = heading != null ? heading : null
+  const currentGpsSpd = speed != null ? speed * 3.6 : null
+  const currentGpsHdg = heading != null ? heading : null
 
-  const dSpd = gpsSpd != null ? Math.abs(gpsSpd - ekfSpd) : null
-  const dHdg = gpsHdg != null ? (() => {
-    const d = Math.abs(gpsHdg - ekfHdg) % 360
+  const currentDSpd = currentGpsSpd != null ? Math.abs(currentGpsSpd - currentEkfSpd) : null
+  const currentDHdg = currentGpsHdg != null ? (() => {
+    const d = Math.abs(currentGpsHdg - currentEkfHdg) % 360
     return d > 180 ? 360 - d : d
   })() : null
 
-  const timeStr = new Date(now).toLocaleTimeString()
-
-  const row: Row = {
-    time: timeStr,
-    gpsSpd,
-    gpsHdg,
-    gpsAcc: accuracy,
-    ekfSpd,
-    ekfHdg,
-    dSpd,
-    dHdg
-  }
-
-  rows.value.unshift(row)
-
-  if (++rowCount > MAX_ROWS) rows.value.pop()
+  // Update current values
+  gpsSpd.value = currentGpsSpd
+  gpsHdg.value = currentGpsHdg
+  gpsAcc.value = accuracy
+  ekfSpd.value = currentEkfSpd
+  ekfHdg.value = currentEkfHdg
+  dSpd.value = currentDSpd
+  dHdg.value = currentDHdg
 
   // Update graphs
-  if (gpsSpd != null) gpsSpeedSeries.append(now, gpsSpd)
-  ekfSpeedSeries.append(now, ekfSpd)
-  if (gpsHdg != null) gpsHeadingSeries.append(now, gpsHdg)
-  ekfHeadingSeries.append(now, ekfHdg)
+  if (gpsSpd.value != null) gpsSpeedSeries.append(now, gpsSpd.value)
+  ekfSpeedSeries.append(now, ekfSpd.value)
+  if (gpsHdg.value != null) gpsHeadingSeries.append(now, gpsHdg.value)
+  ekfHeadingSeries.append(now, ekfHdg.value)
 
   const accClass = accuracy < 20 ? 'ok' : 'warn'
-  status.value = `Fix #${rowCount} · acc ${accuracy.toFixed(0)} m · dt ${dtSec.toFixed(1)} s · EKF ${ekfSpd.toFixed(1)} km/h @ ${ekfHdg.toFixed(0)}°`
+  status.value = `acc ${accuracy.toFixed(0)} m · dt ${dtSec.toFixed(1)} s · EKF ${ekfSpd.value.toFixed(1)} km/h @ ${ekfHdg.value.toFixed(0)}°`
   statusClass.value = accClass
 }
 
@@ -101,8 +89,24 @@ function onError() {
 }
 
 function clearTable() {
-  rows.value = []
-  rowCount = 0
+  gpsSpd.value = null
+  gpsHdg.value = null
+  gpsAcc.value = null
+  ekfSpd.value = 0
+  ekfHdg.value = 0
+  dSpd.value = null
+  dHdg.value = null
+}
+
+function toggleGraphs() {
+  if (isRunning.value) {
+    speedChart.stop()
+    headingChart.stop()
+  } else {
+    speedChart.start()
+    headingChart.start()
+  }
+  isRunning.value = !isRunning.value
 }
 
 onMounted(() => {
@@ -151,11 +155,11 @@ onMounted(() => {
     <div class="graphs">
       <div>
         <h2>Speed (km/h)</h2>
-        <canvas id="speed-canvas" width="800" height="200"></canvas>
+        <canvas id="speed-canvas" style="width: 100%; height: 150px;"></canvas>
       </div>
       <div>
         <h2>Heading (°)</h2>
-        <canvas id="heading-canvas" width="800" height="200"></canvas>
+        <canvas id="heading-canvas" style="width: 100%; height: 150px;"></canvas>
       </div>
     </div>
 
@@ -163,35 +167,33 @@ onMounted(() => {
       <table id="log">
         <thead>
           <tr>
-            <th>Time</th>
-            <th class="gps">GPS spd<br>(km/h)</th>
-            <th class="gps">GPS hdg<br>(°)</th>
-            <th class="gps">GPS acc<br>(m)</th>
-            <th class="ekf">EKF spd<br>(km/h)</th>
-            <th class="ekf">EKF hdg<br>(°)</th>
-            <th class="dlt">Δ spd<br>(km/h)</th>
-            <th class="dlt">Δ hdg<br>(°)</th>
+            <th></th>
+            <th>Raw</th>
+            <th>Filtered</th>
+            <th>Delta</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in rows" :key="row.time">
-            <td>{{ row.time }}</td>
-            <td :class="row.gpsSpd == null ? 'null' : 'gps'">{{ row.gpsSpd == null ? '—' : fmt1(row.gpsSpd) }}</td>
-            <td :class="row.gpsHdg == null ? 'null' : 'gps'">{{ row.gpsHdg == null ? '—' : fmt1(row.gpsHdg) }}</td>
-            <td :class="row.gpsAcc == null ? 'null' : 'gps'">{{ row.gpsAcc == null ? '—' : fmt1(row.gpsAcc) }}</td>
-            <td class="ekf">{{ row.ekfSpd.toFixed(1) }}</td>
-            <td class="ekf">{{ row.ekfHdg.toFixed(1) }}</td>
-            <td :class="row.dSpd == null ? 'null' : 'dlt'">{{ row.dSpd == null ? '—' : fmt1(row.dSpd) }}</td>
-            <td :class="row.dHdg == null ? 'null' : 'dlt'">{{ row.dHdg == null ? '—' : fmt1(row.dHdg) }}</td>
+          <tr>
+            <th>Speed</th>
+            <td :class="gpsSpd == null ? 'null' : 'gps'">{{ gpsSpd == null ? '—' : fmt1(gpsSpd) }}</td>
+            <td class="ekf">{{ ekfSpd.toFixed(1) }}</td>
+            <td :class="dSpd == null ? 'null' : 'dlt'">{{ dSpd == null ? '—' : fmt1(dSpd) }}</td>
+          </tr>
+          <tr>
+            <th>Heading</th>
+            <td :class="gpsHdg == null ? 'null' : 'gps'">{{ gpsHdg == null ? '—' : fmt1(gpsHdg) }}</td>
+            <td class="ekf">{{ ekfHdg.toFixed(1) }}</td>
+            <td :class="dHdg == null ? 'null' : 'dlt'">{{ dHdg == null ? '—' : fmt1(dHdg) }}</td>
           </tr>
         </tbody>
         <tfoot>
           <tr>
-            <td colspan="8">
-              <span class="gps">GPS</span> = raw GeolocationCoordinates &nbsp;·&nbsp;
-              <span class="ekf">EKF</span> = filtered estimate &nbsp;·&nbsp;
-              <span class="dlt">Δ</span> = |GPS − EKF| &nbsp;·&nbsp;
-              — = field not provided by browser/device
+            <td colspan="4">
+              <span class="gps">Raw</span> = GPS &nbsp;·&nbsp;
+              <span class="ekf">Filtered</span> = EKF &nbsp;·&nbsp;
+              <span class="dlt">Delta</span> = |Raw − Filtered| &nbsp;·&nbsp;
+              — = not available
             </td>
           </tr>
         </tfoot>
@@ -199,6 +201,7 @@ onMounted(() => {
     </div>
 
     <button id="btn-clear" @click="clearTable">Clear table</button>
+    <button id="btn-toggle" @click="toggleGraphs">{{ isRunning ? 'Stop' : 'Start' }} graphs</button>
   </div>
 </template>
 
@@ -226,16 +229,19 @@ h2   { font-size: 1rem; margin-bottom: 0.5rem; color: #93c5fd; }
 
 table {
   border-collapse: collapse; width: 100%;
-  font-size: 0.78rem; white-space: nowrap;
+  font-size: 1.2rem; white-space: nowrap;
+  table-layout: fixed;
 }
 th {
-  background: #1e3a5f; color: #93c5fd;
-  padding: 6px 10px; text-align: right;
+  background: #334155; color: #93c5fd;
+  padding: 6px 5px; text-align: right;
+  width: 25%;
 }
-th:first-child { text-align: left; }
+th:first-child { text-align: left; width: 25%; }
 td {
-  padding: 5px 10px; text-align: right;
-  border-bottom: 1px solid #1e293b;
+  padding: 5px 5px; text-align: right;
+  border-bottom: 2px solid #374151;
+  background: #0f172a;
 }
 td:first-child { text-align: left; font-variant-numeric: tabular-nums; color: #64748b; }
 tr:hover td { background: #1e293b; }
@@ -257,4 +263,11 @@ tfoot td {
   color: #e2e8f0; cursor: pointer; font-size: 0.82rem;
 }
 #btn-clear:hover { background: #4b5563; }
+
+#btn-toggle {
+  margin-top: 0.9rem; margin-left: 1rem; padding: 0.35rem 1rem;
+  background: #374151; border: none; border-radius: 5px;
+  color: #e2e8f0; cursor: pointer; font-size: 0.82rem;
+}
+#btn-toggle:hover { background: #4b5563; }
 </style>
